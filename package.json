@@ -1,12 +1,15 @@
 {
   "name": "proxy-totalphone",
-  "version": "1.0.0",
-  "description": "Proxy para baixar áudios do TotalPhone",
+  "version": "2.0.0",
+  "description": "Proxy com Puppeteer para baixar áudios do TotalPhone",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0"
   }
 }
