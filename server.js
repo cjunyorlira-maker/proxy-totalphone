@@ -6,7 +6,6 @@ const SECRET = process.env.PROXY_SECRET || 'sua-chave-secreta-aqui'
 
 let browser = null
 
-// Inicializa o browser uma única vez (reutiliza)
 async function getBrowser() {
   if (browser && browser.isConnected()) {
     return browser
@@ -19,13 +18,11 @@ async function getBrowser() {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
       '--single-process',
       '--disable-gpu',
       '--ignore-certificate-errors',
-      '--ignore-certificate-errors-spki-list',
       '--allow-insecure-localhost',
     ],
   })
@@ -33,55 +30,92 @@ async function getBrowser() {
   return browser
 }
 
-// Função para baixar áudio com Chrome real
 async function baixarAudioComChrome(audioUrl) {
   const browser = await getBrowser()
   const page = await browser.newPage()
   
   try {
-    // Configura User-Agent realista
     await page.setUserAgent(
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     )
     
-    // Configura para capturar a resposta de áudio
-    let audioBuffer = null
-    
-    page.on('response', async (response) => {
-      const contentType = response.headers()['content-type'] || ''
-      const url = response.url()
-      
-      // Captura apenas a resposta do áudio (não HTML)
-      if (url.includes('download_audio.php') && !contentType.includes('text/html')) {
-        try {
-          const buffer = await response.buffer()
-          if (buffer.length > 1024) {
-            audioBuffer = buffer
-            console.log('[Proxy] Áudio capturado:', buffer.length, 'bytes, tipo:', contentType)
-          }
-        } catch (e) {
-          console.error('[Proxy] Erro ao capturar buffer:', e.message)
-        }
-      }
-    })
-    
-    // Navega para a URL do áudio
-    console.log('[Proxy] Navegando para a URL do áudio...')
+    // ESTRATÉGIA: usa fetch dentro do contexto do browser
+    // Primeiro navega para uma página inicial do TotalPhone para criar sessão
+    console.log('[Proxy] Etapa 1: Acessando página inicial para criar sessão...')
     
     try {
-      await page.goto(audioUrl, {
-        waitUntil: 'networkidle0',
-        timeout: 30000,
+      await page.goto('http://45.170.138.80/suite/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 15000,
       })
-    } catch (gotoError) {
-      // Erro de navegação é esperado para downloads (Chrome pode lançar)
-      console.log('[Proxy] Goto terminou (esperado para download):', gotoError.message)
+      console.log('[Proxy] Página inicial carregada')
+    } catch (e) {
+      console.log('[Proxy] Erro ao carregar página inicial (pode ser ok):', e.message)
     }
     
-    // Aguarda um pouco caso o download esteja em progresso
-    await new Promise(resolve => setTimeout(resolve, 2000))
+    // Aguarda um pouco
+    await new Promise(resolve => setTimeout(resolve, 1000))
     
-    return audioBuffer
+    // Agora usa fetch DENTRO do browser para baixar o áudio
+    // Como o fetch roda dentro do Chrome, ele usa o fingerprint TLS do Chrome
+    console.log('[Proxy] Etapa 2: Baixando áudio via fetch do browser...')
+    
+    const audioBase64 = await page.evaluate(async (url) => {
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          credentials: 'include', // envia cookies da sessão
+          headers: {
+            'Accept': 'audio/mpeg, audio/wav, audio/*, */*',
+          },
+        })
+        
+        if (!response.ok) {
+          return { error: `HTTP ${response.status}`, contentType: response.headers.get('content-type') }
+        }
+        
+        const contentType = response.headers.get('content-type') || ''
+        if (contentType.includes('text/html')) {
+          const text = await response.text()
+          return { error: 'HTML retornado', contentType, preview: text.substring(0, 200) }
+        }
+        
+        const buffer = await response.arrayBuffer()
+        const bytes = new Uint8Array(buffer)
+        
+        // Converte para base64
+        let binary = ''
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i])
+        }
+        const base64 = btoa(binary)
+        
+        return { 
+          success: true, 
+          base64, 
+          size: bytes.length,
+          contentType 
+        }
+      } catch (err) {
+        return { error: err.message }
+      }
+    }, audioUrl)
+    
+    if (audioBase64.error) {
+      console.error('[Proxy] Erro no fetch do browser:', audioBase64.error)
+      if (audioBase64.preview) {
+        console.error('[Proxy] Preview:', audioBase64.preview)
+      }
+      return null
+    }
+    
+    if (audioBase64.success && audioBase64.base64) {
+      const buffer = Buffer.from(audioBase64.base64, 'base64')
+      console.log('[Proxy] Áudio baixado:', buffer.length, 'bytes, tipo:', audioBase64.contentType)
+      return buffer
+    }
+    
+    return null
     
   } finally {
     await page.close()
@@ -99,10 +133,9 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // Health check
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ status: 'ok', engine: 'puppeteer', timestamp: new Date().toISOString() }))
+    res.end(JSON.stringify({ status: 'ok', engine: 'puppeteer-v3', timestamp: new Date().toISOString() }))
     return
   }
 
@@ -158,10 +191,9 @@ const server = http.createServer(async (req, res) => {
 })
 
 server.listen(PORT, () => {
-  console.log(`[Proxy TotalPhone v2 - Puppeteer] Rodando na porta ${PORT}`)
+  console.log(`[Proxy TotalPhone v3 - Puppeteer fetch] Rodando na porta ${PORT}`)
 })
 
-// Cleanup ao fechar
 process.on('SIGTERM', async () => {
   if (browser) await browser.close()
   process.exit(0)
